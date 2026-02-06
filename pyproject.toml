@@ -1,0 +1,23 @@
+[project]
+name = "forensics-project"
+version = "0.1.0"
+description = "Onii-chan's super cool background removal and forensics tool!"
+readme = "README.md"
+requires-python = ">=3.13"
+dependencies = [
+    "rembg>=2.0.60",
+    "numba>=0.61.0",
+    "onnxruntime>=1.19.0",
+    "opencv-python>=4.10.0",
+    "pillow>=11.0.0",
+    "matplotlib>=3.10.8",
+    "scipy>=1.17.0",
+    "scikit-image>=0.26.0",
+    "scikit-learn>=1.8.0",
+]
+
+[tool.uv]
+resolution = "highest"
+override-dependencies = [
+    "numba>=0.61.0",
+]
