@@ -22,6 +22,69 @@ class BlotchBlurScorerV16:
         mask = np.array(output_mask)[:, :, 3] > 128
         return mask
 
+    def _line_integrity(self, gray: np.ndarray, mask: np.ndarray) -> dict:
+        gray_u8 = (gray * 255.0).astype(np.uint8)
+        blurred_u8 = cv2.GaussianBlur(gray_u8, (0, 0), 1.0)
+        masked_vals = blurred_u8[mask]
+
+        if masked_vals.size == 0:
+            return {
+                "line_score": 0.0,
+                "edge_strength": 0.0,
+                "edge_density": 0.0,
+                "edge_spread": 0.0,
+                "edge_sharpness": 0.0,
+                "edge_map": np.zeros_like(gray),
+            }
+
+        v = float(np.median(masked_vals))
+        lower = int(max(10, 0.66 * v))
+        upper = int(min(255, 1.33 * v))
+        if upper <= lower:
+            lower, upper = 20, 60
+
+        edges = cv2.Canny(blurred_u8, lower, upper)
+        edge_mask = (edges > 0) & mask
+        edge_density = float(np.sum(edge_mask) / (np.sum(mask) + 1e-6))
+
+        gx = cv2.Sobel(gray, cv2.CV_32F, 1, 0, ksize=3)
+        gy = cv2.Sobel(gray, cv2.CV_32F, 0, 1, ksize=3)
+        gmag = np.sqrt(gx * gx + gy * gy)
+
+        if np.any(edge_mask):
+            edge_g = float(np.mean(gmag[edge_mask]))
+        else:
+            edge_g = 0.0
+
+        dil = cv2.dilate(edge_mask.astype(np.uint8), np.ones((3, 3), np.uint8), iterations=2) > 0
+        ring_mask = dil & (~edge_mask) & mask
+        ring_g = float(np.mean(gmag[ring_mask])) if np.any(ring_mask) else 0.0
+
+        edge_sharpness = edge_g / (ring_g + 1e-6)
+        edge_spread = ring_g / (edge_g + 1e-6)
+
+        edge_strength = float(np.clip((edge_g - 0.03) / 0.12, 0.0, 1.0))
+        edge_density_n = float(np.clip(edge_density / 0.08, 0.0, 1.0))
+        sharpness_n = float(np.clip((edge_sharpness - 1.2) / 1.8, 0.0, 1.0))
+
+        line_score = 10.0 * (
+            0.50 * sharpness_n
+            + 0.30 * edge_strength
+            + 0.20 * edge_density_n
+        )
+
+        edge_map = np.zeros_like(gray)
+        edge_map[mask] = edges[mask] / 255.0
+
+        return {
+            "line_score": float(line_score),
+            "edge_strength": edge_strength,
+            "edge_density": edge_density,
+            "edge_spread": edge_spread,
+            "edge_sharpness": edge_sharpness,
+            "edge_map": edge_map,
+        }
+
     def analyze(self, image: Image.Image) -> dict:
         img_rgb = np.array(image.convert("RGB"))
         gray = cv2.cvtColor(img_rgb, cv2.COLOR_RGB2GRAY).astype(np.float32) / 255.0
@@ -50,19 +113,7 @@ class BlotchBlurScorerV16:
         # Clean (00166): 0.0206. Noisy (038-04): 0.0233.
         mf_median = np.median(s_mf)
 
-        # --- 2. Texture Score (Void Detection & Noise Penalty) ---
-        # Highly sensitive noise penalty to separate 0.020 from 0.023
-        # We want to reward "Clean Smoothness"
-        noise_penalty = np.clip(1.0 - (mf_median - 0.018) * 100.0, 0.2, 1.0)
-
-        v_baseline = np.percentile(s_lvar, 20)
-        starv_mask = (lvar < (v_baseline * 0.4)) & mask
-        starved_ratio = np.sum(starv_mask) / np.sum(mask)
-
-        t_base = 10.0 * np.exp(-12.0 * max(0, starved_ratio - 0.03))
-        t_score = t_base * noise_penalty
-
-        # --- 3. Detail Score (Clean Detail Ratio) ---
+        # --- 2. Detail Score (Clean Detail Ratio) ---
         avg_hf = np.mean(s_hf)
         avg_mf = np.mean(s_mf)
         raw_ratio = avg_hf / (avg_mf + 1e-6)
@@ -74,13 +125,24 @@ class BlotchBlurScorerV16:
         # Calibrated Detail Curve
         d_score = 10.0 * np.clip((raw_ratio - 0.9) / 0.12, 0, 1) * clean_detail_mult
 
-        # --- Final Scoring ---
-        overall = (t_score * 0.5) + (d_score * 0.5)
+        # --- 3. Texture Score (Continuous: detail-gated + band-pass + voids) ---
+        v_baseline = np.percentile(s_lvar, 20)
+        starv_mask = (lvar < (v_baseline * 0.4)) & mask
+        starved_ratio = np.sum(starv_mask) / np.sum(mask)
 
-        # Benchmark Pass for 00166
-        # If the image matches the clean reference floor and has consistency
-        if mf_median < 0.022 and avg_mf < 0.05:
-            overall = np.clip(overall + 2.0, 0, 10)
+        detail_norm = np.clip(d_score / 10.0, 0.0, 1.0)
+        detail_gate = 0.30 + 0.70 * detail_norm
+        void_score = np.exp(-((starved_ratio / 0.08) ** 2))
+        mf_balance = np.exp(-(((avg_mf - 0.05) / 0.015) ** 2))
+        noise_score = 1.0 / (1.0 + np.exp((mf_median - 0.022) / 0.003))
+
+        t_score = 10.0 * detail_gate * void_score * mf_balance * noise_score
+
+        # --- Final Scoring ---
+        line_metrics = self._line_integrity(gray, mask)
+        line_score = line_metrics["line_score"]
+
+        overall = (t_score * 0.45) + (d_score * 0.45) + (line_score * 0.10)
 
         # Maps
         blotch_f = np.zeros_like(gray)
@@ -93,13 +155,19 @@ class BlotchBlurScorerV16:
         return {
             "texture_score": float(t_score),
             "detail_score": float(d_score),
+            "line_score": float(line_score),
             "overall_score": float(overall),
             "blotch_map": blotch_f,
             "blur_map": blur_f,
+            "edge_map": line_metrics["edge_map"],
             "mask": mask,
             "img_rgb": img_rgb,
             "noise_floor": float(mf_median),
             "avg_mf": float(avg_mf),
+            "edge_strength": float(line_metrics["edge_strength"]),
+            "edge_density": float(line_metrics["edge_density"]),
+            "edge_spread": float(line_metrics["edge_spread"]),
+            "edge_sharpness": float(line_metrics["edge_sharpness"]),
         }
 
 
@@ -125,8 +193,13 @@ if __name__ == "__main__":
     print(f"Overall Score:  {res['overall_score']:.2f} / 10.0")
     print(f"Texture Score:  {res['texture_score']:.2f} (Clean Consistency)")
     print(f"Detail Score:   {res['detail_score']:.2f} (Signal Ratio)")
+    print(f"Line Score:     {res['line_score']:.2f} (Edge Integrity)")
     print(f"Noise Floor:    {res['noise_floor']:.4f}")
     print(f"Avg MF Energy:  {res['avg_mf']:.4f}")
+    print(f"Edge Strength:  {res['edge_strength']:.3f}")
+    print(f"Edge Density:   {res['edge_density']:.3f}")
+    print(f"Edge Spread:    {res['edge_spread']:.3f}")
+    print(f"Edge Sharpness: {res['edge_sharpness']:.3f}")
     print(f"---------------------------------\n")
 
     if args.no_plot:
