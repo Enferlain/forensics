@@ -1,0 +1,8 @@
+- TODO (future ideas)
+- Validate generalization on new/unseen image sets: check if clean subjects rank above artifact-heavy outputs.
+- Stability checks: repeatability across runs, small perturbations (resize/JPEG/light blur), and weight sensitivity.
+- Reduce resolution advantage: normalize detail metrics to a fixed scale or downsample before scoring.
+- Add a lightweight “reject rule” for undertrained/merge artifacts using a couple of metric thresholds.
+- Use the manually/automatically scored images as a calibration set to tune thresholds and validate rankings.
+- Build a small analysis script to merge manual filename scores with metric scores and report mismatches.
+- Consider a separate color-quality score if color quality is a requirement (keep subject quality separate).

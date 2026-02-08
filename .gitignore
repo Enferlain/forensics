@@ -1,1 +1,20 @@
-.venv
+# Virtual environments / package caches
+.venv/
+.venv-*/
+.venv-linux/
+.uv-cache/
+
+# Python bytecode
+__pycache__/
+*.py[cod]
+
+# Generated outputs (keep labels/ and images in test/ folders tracked as needed)
+outputs/
+metric_maps/
+
+# Legacy scratch artifacts that may exist at repo root
+image_quality_metrics*.csv
+*_joined.csv
+*png
+*jpg
+*webp
